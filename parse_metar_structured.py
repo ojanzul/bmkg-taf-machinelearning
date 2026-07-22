@@ -33,10 +33,14 @@ FIELDNAMES = [
     "weather_phenomena",
     "sky_layer1_cover",
     "sky_layer1_height_ft",
+    "sky_layer1_type",  # CB (cumulonimbus) / TCU (towering cumulus) / None
     "sky_layer2_cover",
     "sky_layer2_height_ft",
+    "sky_layer2_type",
     "sky_layer3_cover",
     "sky_layer3_height_ft",
+    "sky_layer3_type",
+    "has_cb",  # flag biner: ada awan CB di lapisan mana pun (indikator konvektif kuat)
     "temp_c",
     "dewpoint_c",
     "qnh_hpa",
@@ -49,10 +53,10 @@ FIELDNAMES = [
 def sky_layer_value(obs, index):
     """Ambil (cover, height_ft) untuk layer awan ke-`index`, atau (None, None)."""
     if obs.sky and len(obs.sky) > index:
-        cover, height, _ = obs.sky[index]
+        cover, height, cloud_type = obs.sky[index]
         height_ft = height.value("FT") if height is not None else None
-        return cover, height_ft
-    return None, None
+        return cover, height_ft, cloud_type
+    return None, None, None
 
 
 def detect_thunderstorm(obs) -> tuple[int, int, str | None]:
@@ -88,9 +92,10 @@ def parse_one_line(raw_line: str) -> dict | None:
         print(f"[SKIP] gagal parsing: {raw_line[:60]}... -> {e}", file=sys.stderr)
         return None
 
-    l1_cover, l1_h = sky_layer_value(obs, 0)
-    l2_cover, l2_h = sky_layer_value(obs, 1)
-    l3_cover, l3_h = sky_layer_value(obs, 2)
+    l1_cover, l1_h, l1_type = sky_layer_value(obs, 0)
+    l2_cover, l2_h, l2_type = sky_layer_value(obs, 1)
+    l3_cover, l3_h, l3_type = sky_layer_value(obs, 2)
+    has_cb = 1 if "CB" in (l1_type, l2_type, l3_type) else 0
 
     weather_str = " ".join(str(w) for w in obs.weather) if obs.weather else ""
     has_ts, ts_in_vicinity, ts_intensity = detect_thunderstorm(obs)
@@ -107,10 +112,14 @@ def parse_one_line(raw_line: str) -> dict | None:
         "weather_phenomena": weather_str,
         "sky_layer1_cover": l1_cover,
         "sky_layer1_height_ft": l1_h,
+        "sky_layer1_type": l1_type,
         "sky_layer2_cover": l2_cover,
         "sky_layer2_height_ft": l2_h,
+        "sky_layer2_type": l2_type,
         "sky_layer3_cover": l3_cover,
         "sky_layer3_height_ft": l3_h,
+        "sky_layer3_type": l3_type,
+        "has_cb": has_cb,
         "temp_c": obs.temp.value("C") if obs.temp else None,
         "dewpoint_c": obs.dewpt.value("C") if obs.dewpt else None,
         "qnh_hpa": obs.press.value("HPA") if obs.press else None,
