@@ -1,0 +1,37 @@
+name: Update METAR WALS dataset
+
+# Jadwal harian jam 01:00 UTC (= 09:00 WITA) -- cukup 1x/hari untuk
+# arsip historis. Bisa dipicu manual juga lewat tab "Actions" di GitHub.
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch: {}
+
+# Supaya job bisa commit balik ke repo
+permissions:
+  contents: write
+
+jobs:
+  update-dataset:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan pipeline (scrape -> parse -> label)
+        run: python run_pipeline.py
+
+      - name: Commit & push perubahan data
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update dataset METAR WALS otomatis"
+          file_pattern: "data/*.csv data/*.txt"
