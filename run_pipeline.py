@@ -21,12 +21,11 @@ GitHub Actions.
 """
 
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
-from scrape_metar_bmkg import scrape_wals
+from fetch_metar_api import fetch_latest_metar
 from parse_metar_structured import parse_one_line, FIELDNAMES
 from build_time_shifted_labels import build_labels
 
@@ -35,25 +34,22 @@ RAW_ARCHIVE_FILE = DATA_DIR / "wals_metar_raw_archive.txt"
 STRUCTURED_FILE = DATA_DIR / "wals_metar_structured.csv"
 TRAINING_FILE = DATA_DIR / "wals_training_dataset.csv"
 
-# Window scrape tiap run -- overlap 3 hari supaya toleran keterlambatan
-SCRAPE_WINDOW_DAYS = 3
+ICAO = "WALS"
 
 
 def step_scrape() -> list[str]:
-    end = datetime.utcnow()
-    start = end - timedelta(days=SCRAPE_WINDOW_DAYS)
-    print(f"[SCRAPE] menarik WALS dari {start} sampai {end} (UTC)")
+    print(f"[FETCH] menarik observasi terkini {ICAO} dari API resmi BMKG")
 
     try:
-        new_lines = scrape_wals(start, end)
+        new_lines = fetch_latest_metar(ICAO)
     except Exception as e:
-        print(f"[SCRAPE] GAGAL: {e}", file=sys.stderr)
-        # Kalau scrape gagal (misal token CSRF berubah format), hentikan
+        print(f"[FETCH] GAGAL: {e}", file=sys.stderr)
+        # Kalau fetch gagal (token invalid, API down, dll), hentikan
         # pipeline di sini -- jangan lanjut ke parse/label pakai data lama
         # seolah-olah berhasil.
         raise
 
-    print(f"[SCRAPE] dapat {len(new_lines)} baris mentah")
+    print(f"[FETCH] dapat {len(new_lines)} baris mentah")
     return new_lines
 
 
