@@ -1,10 +1,12 @@
 name: Update METAR WALS dataset
 
-# Jadwal harian jam 01:00 UTC (= 09:00 WITA) -- cukup 1x/hari untuk
-# arsip historis. Bisa dipicu manual juga lewat tab "Actions" di GitHub.
+# API resmi BMKG cuma kasih 2 observasi TERKINI (bukan rentang historis),
+# jadi jadwal harus sering -- tiap 30 menit, mengikuti interval terbit
+# METAR reguler -- supaya tidak ada jam yang terlewat & hilang permanen.
+# Bisa dipicu manual juga lewat tab "Actions" di GitHub.
 on:
   schedule:
-    - cron: "0 1 * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 # Supaya job bisa commit balik ke repo
@@ -27,7 +29,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Jalankan pipeline (scrape -> parse -> label)
+      - name: Jalankan pipeline (fetch API -> parse -> label)
+        env:
+          BMKG_API_TOKEN: ${{ secrets.BMKG_API_TOKEN }}
         run: python run_pipeline.py
 
       - name: Commit & push perubahan data
