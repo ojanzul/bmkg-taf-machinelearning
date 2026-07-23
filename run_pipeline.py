@@ -26,9 +26,19 @@ Alur tiap kali dijalankan (idempotent, aman dijalankan berulang):
 
 Semua file disimpan di folder data/ supaya gampang di-commit balik oleh
 GitHub Actions.
+5. SUPABASE (opsional): kalau env var SUPABASE_URL & SUPABASE_KEY di-set,
+             baris METAR yang sama juga di-upsert ke Supabase (tabel
+             metar_observations, lihat supabase_schema.sql). Ini melengkapi
+             arsip git-CSV: Supabase jadi sumber query rolling-window yang
+             lebih murah/cepat untuk dipakai script inferensi harian nanti,
+             tanpa harus checkout seluruh repo git. Kalau secret belum
+             di-set, langkah ini dilewati (tidak bikin pipeline gagal --
+             supaya orang yang belum setup Supabase tetap bisa jalan normal
+             pakai arsip git-CSV saja).
 """
 
 import csv
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,7 +46,7 @@ from pathlib import Path
 import pandas as pd
 
 from fetch_metar_api import fetch_latest_metar
-from parse_metar_structured import parse_one_line, FIELDNAMES
+from parse_metar_structured import parse_one_line, resolve_month_year, FIELDNAMES
 from build_time_shifted_labels import build_labels
 
 DATA_DIR = Path("data")
@@ -96,13 +106,13 @@ def _load_archive() -> dict[str, str]:
     return archive
 
 
-def step_merge_archive(new_lines: list[str]) -> dict[str, str]:
+def step_merge_archive(new_lines: list[str], now_utc: datetime) -> dict[str, str]:
     DATA_DIR.mkdir(exist_ok=True)
 
     archive = _load_archive()
     n_before = len(archive)
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = now_utc.isoformat()
     for line in new_lines:
         line = line.strip()
         if line and line not in archive:
@@ -124,6 +134,51 @@ def step_merge_archive(new_lines: list[str]) -> dict[str, str]:
         LEGACY_RAW_ARCHIVE_TXT.unlink()
 
     return archive
+
+
+def step_upsert_supabase(new_lines: list[str], now_utc: datetime) -> int:
+    """
+    Upsert baris METAR baru ke Supabase (tabel metar_observations).
+    Dilewati (bukan error) kalau SUPABASE_URL/SUPABASE_KEY belum di-set --
+    supaya orang yang belum setup Supabase tetap bisa jalan normal.
+    """
+    if not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY")):
+        print("[SUPABASE] SUPABASE_URL/SUPABASE_KEY belum di-set, langkah ini dilewati")
+        return 0
+
+    import re
+    from supabase import create_client
+
+    line_re = re.compile(r"^(METAR|SPECI)\s+(\w{4})\s+(\d{2})(\d{2})(\d{2})Z")
+    records = []
+    for line in new_lines:
+        line = line.strip().rstrip("=").strip()
+        m = line_re.match(line)
+        if not m:
+            continue
+        kind, station, dd, hh, mi = m.groups()
+        year, month = resolve_month_year(now_utc, int(dd))
+        obs_dt = datetime(year, month, int(dd), int(hh), int(mi), tzinfo=timezone.utc)
+        records.append({
+            "station": station,
+            "kind": kind,
+            "obs_datetime": obs_dt.isoformat(),
+            "raw_text": line,
+        })
+
+    if not records:
+        print("[SUPABASE] tidak ada baris baru untuk di-upsert")
+        return 0
+
+    client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    resp = (
+        client.table("metar_observations")
+        .upsert(records, on_conflict="station,obs_datetime,kind", ignore_duplicates=True)
+        .execute()
+    )
+    n = len(resp.data) if resp.data else 0
+    print(f"[SUPABASE] {n} baris di-upsert (duplikat otomatis dilewati)")
+    return n
 
 
 def step_parse(archive: dict[str, str]) -> pd.DataFrame:
@@ -153,8 +208,10 @@ def step_label(df: pd.DataFrame) -> None:
 
 
 def main():
+    now_utc = datetime.now(timezone.utc)
     new_lines = step_scrape()
-    archive = step_merge_archive(new_lines)
+    archive = step_merge_archive(new_lines, now_utc)
+    step_upsert_supabase(new_lines, now_utc)
     df = step_parse(archive)
     step_label(df)
     print("\nPipeline selesai.")
