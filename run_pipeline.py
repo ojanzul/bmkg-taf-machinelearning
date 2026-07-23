@@ -1,16 +1,24 @@
 """
-Orchestrator pipeline harian: scrape -> parse -> label time-shifted
+Orchestrator pipeline harian: fetch -> parse -> label time-shifted
 =====================================================================
 
 Alur tiap kali dijalankan (idempotent, aman dijalankan berulang):
 
-1. SCRAPE  : tarik METAR WALS untuk window waktu terbaru (default: 3 hari
-             terakhir -- ada overlap sengaja supaya tidak ada jam yang
-             kelewat kalau ada keterlambatan run/network hiccup)
-2. GABUNG  : gabungkan hasil scrape baru ke arsip mentah akumulatif,
-             dedup berdasarkan teks METAR persis sama (biar aman dari
-             duplikat akibat overlap window)
-3. PARSE   : parse SELURUH arsip mentah -> tabel terstruktur
+1. FETCH   : tarik METAR WALS terkini dari API resmi BMKG (2 laporan
+             terakhir)
+2. GABUNG  : gabungkan hasil fetch baru ke arsip mentah akumulatif
+             (data/wals_metar_raw_archive.csv). Tiap baris disimpan
+             berpasangan dengan `first_seen_utc` -- waktu SAAT baris itu
+             PERTAMA KALI berhasil di-fetch. Ini krusial: METAR mentah
+             cuma menyimpan DDHHMM (tanpa bulan/tahun), jadi first_seen_utc
+             inilah yang dipakai buat menentukan bulan/tahun yang benar
+             saat parsing -- BUKAN tanggal sistem saat parsing dijalankan
+             (itu bug lama: re-parse arsip lama di bulan berjalan akan
+             salah kasih bulan/tahun ke semua baris historis).
+             Baris yang SUDAH ada di arsip TIDAK ditimpa first_seen_utc-nya
+             (supaya nilai aslinya -- yang paling akurat -- tetap terjaga).
+3. PARSE   : parse SELURUH arsip mentah -> tabel terstruktur, pakai
+             first_seen_utc masing-masing baris sebagai hint bulan/tahun
              (overwrite penuh tiap run, murah karena datanya masih kecil;
              kalau nanti sudah jutaan baris, ini bisa dioptimasi jadi
              incremental juga)
@@ -20,7 +28,9 @@ Semua file disimpan di folder data/ supaya gampang di-commit balik oleh
 GitHub Actions.
 """
 
+import csv
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -30,7 +40,8 @@ from parse_metar_structured import parse_one_line, FIELDNAMES
 from build_time_shifted_labels import build_labels
 
 DATA_DIR = Path("data")
-RAW_ARCHIVE_FILE = DATA_DIR / "wals_metar_raw_archive.txt"
+RAW_ARCHIVE_FILE = DATA_DIR / "wals_metar_raw_archive.csv"
+LEGACY_RAW_ARCHIVE_TXT = DATA_DIR / "wals_metar_raw_archive.txt"
 STRUCTURED_FILE = DATA_DIR / "wals_metar_structured.csv"
 TRAINING_FILE = DATA_DIR / "wals_training_dataset.csv"
 
@@ -53,33 +64,78 @@ def step_scrape() -> list[str]:
     return new_lines
 
 
-def step_merge_archive(new_lines: list[str]) -> list[str]:
+def _load_archive() -> dict[str, str]:
+    """
+    Baca arsip -> dict {raw_metar: first_seen_utc_iso}.
+    Migrasi otomatis dari format lama (.txt polos, tanpa first_seen_utc)
+    kalau arsip CSV baru belum ada tapi arsip lama masih ada -- baris lama
+    dikasih first_seen_utc = sekarang (best effort; baris-baris itu memang
+    baru saja mulai dikumpulkan jadi risikonya kecil).
+    """
+    archive: dict[str, str] = {}
+
+    if RAW_ARCHIVE_FILE.exists():
+        with RAW_ARCHIVE_FILE.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            for rec in reader:
+                archive[rec["raw_metar"]] = rec["first_seen_utc"]
+        return archive
+
+    if LEGACY_RAW_ARCHIVE_TXT.exists():
+        print(
+            f"[GABUNG] arsip lama format .txt ditemukan ({LEGACY_RAW_ARCHIVE_TXT}), "
+            f"migrasi ke format CSV baru dengan first_seen_utc=sekarang",
+            file=sys.stderr,
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for line in LEGACY_RAW_ARCHIVE_TXT.read_text().splitlines():
+            line = line.strip()
+            if line:
+                archive[line] = now_iso
+
+    return archive
+
+
+def step_merge_archive(new_lines: list[str]) -> dict[str, str]:
     DATA_DIR.mkdir(exist_ok=True)
 
-    existing_lines: set[str] = set()
-    if RAW_ARCHIVE_FILE.exists():
-        existing_lines = {
-            line.strip() for line in RAW_ARCHIVE_FILE.read_text().splitlines() if line.strip()
-        }
+    archive = _load_archive()
+    n_before = len(archive)
 
-    combined = existing_lines.union(line.strip() for line in new_lines if line.strip())
-    n_added = len(combined) - len(existing_lines)
-    print(f"[GABUNG] {n_added} baris baru ditambahkan ke arsip (total: {len(combined)})")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for line in new_lines:
+        line = line.strip()
+        if line and line not in archive:
+            archive[line] = now_iso  # first_seen_utc HANYA diset saat baris baru muncul
 
-    # Urutkan biar arsipnya rapi & gampang diaudit manual
-    sorted_lines = sorted(combined)
-    RAW_ARCHIVE_FILE.write_text("\n".join(sorted_lines) + "\n")
-    return sorted_lines
+    n_added = len(archive) - n_before
+    print(f"[GABUNG] {n_added} baris baru ditambahkan ke arsip (total: {len(archive)})")
+
+    # Urutkan berdasarkan first_seen_utc (bukan sort teks -- sort teks DDHHMM
+    # akan berulang tiap bulan dan tidak benar-benar kronologis lintas bulan)
+    rows = sorted(archive.items(), key=lambda kv: kv[1])
+    with RAW_ARCHIVE_FILE.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["raw_metar", "first_seen_utc"])
+        writer.writerows(rows)
+
+    # Bersihkan arsip lama supaya tidak ada 2 sumber kebenaran yang beda
+    if LEGACY_RAW_ARCHIVE_TXT.exists():
+        LEGACY_RAW_ARCHIVE_TXT.unlink()
+
+    return archive
 
 
-def step_parse(all_lines: list[str]) -> pd.DataFrame:
+def step_parse(archive: dict[str, str]) -> pd.DataFrame:
     rows = []
-    for line in all_lines:
-        parsed = parse_one_line(line)
+    for raw_metar, first_seen_iso in archive.items():
+        first_seen = datetime.fromisoformat(first_seen_iso)
+        parsed = parse_one_line(raw_metar, first_seen)
         if parsed:
             rows.append(parsed)
 
     df = pd.DataFrame(rows, columns=FIELDNAMES)
+    df = df.sort_values("valid_time_utc").reset_index(drop=True)
     df.to_csv(STRUCTURED_FILE, index=False)
     print(f"[PARSE] {len(df)} baris berhasil diparse -> {STRUCTURED_FILE}")
     return df
@@ -98,8 +154,8 @@ def step_label(df: pd.DataFrame) -> None:
 
 def main():
     new_lines = step_scrape()
-    all_lines = step_merge_archive(new_lines)
-    df = step_parse(all_lines)
+    archive = step_merge_archive(new_lines)
+    df = step_parse(archive)
     step_label(df)
     print("\nPipeline selesai.")
 
