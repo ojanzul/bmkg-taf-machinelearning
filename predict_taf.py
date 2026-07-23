@@ -1,8 +1,8 @@
 """
-Script Inferensi Prediksi TAF WALS (Thunderstorm Auto-Forecaster)
-==================================================================
-Memuat model .joblib untuk memprediksi probabilitas TS dalam 
-horizon 3 jam mendatang berdasarkan data terkini.
+Script Inferensi Auto-Forecaster TAF WALS
+=========================================
+Menarik data METAR & NWP terkini, memprediksi risiko TS (+3 jam),
+dan mengirimkan hasilnya ke tabel 'taf_predictions' di Supabase.
 """
 
 import os
@@ -11,14 +11,13 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
 import requests
+from supabase import create_client
 
 from fetch_metar_api import fetch_latest_metar
 from parse_metar_structured import parse_one_line
 
-# Path ke file model
 MODEL_PATH = "models/taf_wals_ts_model.joblib"
 
-# Urutan fitur harus sama persis seperti saat training di Colab
 FEATURE_COLS = [
     "temp_c", "dewpoint_c", "dewpoint_depression", "qnh_hpa", 
     "wind_speed_kt", "wind_u", "wind_v", "visibility_m",
@@ -26,17 +25,23 @@ FEATURE_COLS = [
     "sin_hour", "cos_hour", "has_cb", "has_ts"
 ]
 
+def get_supabase_client():
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        print("[WARN] Key Supabase tidak ditemukan, hasil tidak disimpann ke DB.")
+        return None
+    return create_client(url, key)
+
 def load_model():
-    """Memuat model LightGBM dari file .joblib"""
     if os.path.exists(MODEL_PATH):
         return joblib.load(MODEL_PATH)
     elif os.path.exists("taf_wals_ts_model.joblib"):
         return joblib.load("taf_wals_ts_model.joblib")
     else:
-        raise FileNotFoundError(f"File model tidak ditemukan di {MODEL_PATH}")
+        raise FileNotFoundError(f"Model tidak ditemukan di {MODEL_PATH}")
 
 def fetch_latest_nwp_openmeteo():
-    """Mengambil parameter termodinamika terkini dari Open-Meteo API (WALS / Samarinda)."""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": -0.3866,
@@ -56,22 +61,19 @@ def fetch_latest_nwp_openmeteo():
         "convective_inhibition_(J/kg)": data["convective_inhibition"]
     })
 
-def predict_current_ts_risk():
-    """Fungsi utama inferensi real-time."""
+def predict_and_save():
     print("[INFERENSI] Memuat model Machine Learning...")
     model = load_model()
     
-    # 1. Ambil METAR WALS Terkini
     print("[INFERENSI] Menarik METAR WALS terkini...")
     raw_lines = fetch_latest_metar("WALS")
     if not raw_lines:
-        print("[ERROR] Tidak ada data METAR yang diterima.")
+        print("[ERROR] Tidak ada data METAR.")
         return
         
     latest_raw = raw_lines[0]
     now_utc = datetime.now(timezone.utc)
     parsed = parse_one_line(latest_raw, now_utc)
-    
     if not parsed:
         print("[ERROR] Gagal memparsing METAR.")
         return
@@ -79,11 +81,9 @@ def predict_current_ts_risk():
     df_obs = pd.DataFrame([parsed])
     df_obs["valid_time_utc"] = pd.to_datetime(df_obs["valid_time_utc"])
     
-    # 2. Ambil data NWP Open-Meteo
-    print("[INFERENSI] Menarik data termodinamika NWP...")
+    print("[INFERENSI] Menarik data NWP Open-Meteo...")
     df_nwp = fetch_latest_nwp_openmeteo()
     
-    # 3. Merging (Asof Join)
     df_merged = pd.merge_asof(
         df_obs.sort_values("valid_time_utc"),
         df_nwp.sort_values("time"),
@@ -92,7 +92,6 @@ def predict_current_ts_risk():
         direction="nearest"
     )
     
-    # 4. Feature Engineering
     df_merged["dewpoint_depression"] = df_merged["temp_c"] - df_merged["dewpoint_c"]
     rad = np.radians(df_merged["wind_dir_deg"].fillna(0))
     df_merged["wind_u"] = -df_merged["wind_speed_kt"].fillna(0) * np.sin(rad)
@@ -103,16 +102,8 @@ def predict_current_ts_risk():
     df_merged["cos_hour"] = np.cos(2 * np.pi * hour / 24.0)
     
     X = df_merged[FEATURE_COLS].fillna(0)
-    
-    # 5. Prediksi Risk TS
-    prob_ts = model.predict_proba(X)[0][1]
+    prob_ts = float(model.predict_proba(X)[0][1])
     prob_percent = prob_ts * 100
-    
-    print("\n" + "="*55)
-    print(f"📌 METAR Terkini       : {latest_raw}")
-    print(f"🕒 Waktu Observasi     : {df_merged['valid_time_utc'].values[0]}")
-    print(f"🌩️ Probabilitas TS (+3j): {prob_percent:.2f}%")
-    print("="*55)
     
     if prob_percent >= 40.0:
         taf_code = "PROB40 TSRA"
@@ -121,7 +112,29 @@ def predict_current_ts_risk():
     else:
         taf_code = "NSW (No Significant Weather)"
         
-    print(f"💡 Rekomendasi TAF     : {taf_code}\n")
+    valid_time_str = df_merged["valid_time_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ").values[0]
+    
+    print("\n" + "="*55)
+    print(f"📌 METAR Terkini       : {latest_raw}")
+    print(f"🕒 Waktu Observasi     : {valid_time_str}")
+    print(f"🌩️ Probabilitas TS (+3j): {prob_percent:.2f}%")
+    print(f"💡 Rekomendasi TAF     : {taf_code}")
+    print("="*55)
+    
+    # Simpan ke Supabase
+    supabase = get_supabase_client()
+    if supabase:
+        record = {
+            "valid_time_utc": valid_time_str,
+            "metar_raw": latest_raw,
+            "prob_ts": prob_ts,
+            "taf_suggestion": taf_code
+        }
+        try:
+            supabase.table("taf_predictions").upsert(record, on_conflict="valid_time_utc").execute()
+            print("[SUPABASE] Berhasil menyimpan prediksi ke database!")
+        except Exception as e:
+            print(f"[SUPABASE ERROR] {e}")
 
 if __name__ == "__main__":
-    predict_current_ts_risk()
+    predict_and_save()
