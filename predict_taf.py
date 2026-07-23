@@ -79,7 +79,7 @@ def predict_and_save():
         return
         
     df_obs = pd.DataFrame([parsed])
-    df_obs["valid_time_utc"] = pd.to_datetime(df_obs["valid_time_utc"])
+    df_obs["valid_time_utc"] = pd.to_datetime(df_obs["valid_time_utc"], utc=True)
     
     print("[INFERENSI] Menarik data NWP Open-Meteo...")
     df_nwp = fetch_latest_nwp_openmeteo()
