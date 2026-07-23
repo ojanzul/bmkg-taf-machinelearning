@@ -29,9 +29,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Jalankan pipeline (fetch API -> parse -> label)
+      - name: Jalankan pipeline (fetch API -> parse -> label -> upsert Supabase)
         env:
           BMKG_API_TOKEN: ${{ secrets.BMKG_API_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python run_pipeline.py
 
       - name: Commit & push perubahan data
