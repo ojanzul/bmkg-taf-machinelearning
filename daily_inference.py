@@ -60,9 +60,35 @@ def fetch_recent_metar_from_supabase(hours_back: int = 18) -> pd.DataFrame:
         .execute()
     )
     if not resp.data:
+        # Diagnostik tambahan: bedakan "tabel benar-benar kosong" (belum
+        # pernah ada ingest sukses -- biasanya karena secrets baru
+        # ditambahkan setelah run terakhir) vs "cuma gap data terkini"
+        # (ingest sempat jalan, tapi berhenti/telat).
+        total_resp = (
+            client.table("metar_observations")
+            .select("obs_datetime", count="exact")
+            .eq("station", ICAO)
+            .order("obs_datetime", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not total_resp.data:
+            raise RuntimeError(
+                f"Tabel metar_observations utk station={ICAO} KOSONG SAMA SEKALI. "
+                f"Kemungkinan besar update_metar_dataset.yml belum pernah berhasil "
+                f"upsert -- cek log step 'Jalankan pipeline', cari baris "
+                f"'[SUPABASE] N baris di-upsert'. Kalau tertulis "
+                f"'SUPABASE_URL/SUPABASE_KEY belum di-set, langkah ini dilewati', "
+                f"berarti run itu terjadi SEBELUM secrets ditambahkan -- trigger "
+                f"manual ulang workflow-nya."
+            )
+        last_obs = total_resp.data[0]["obs_datetime"]
         raise RuntimeError(
-            f"Tidak ada observasi METAR {ICAO} dalam {hours_back} jam terakhir di Supabase. "
-            f"Cek apakah update_metar_dataset.yml jalan normal."
+            f"Tidak ada observasi METAR {ICAO} dalam {hours_back} jam terakhir, "
+            f"TAPI tabel tidak kosong -- observasi terakhir tercatat {last_obs}. "
+            f"Ini gap data (bukan tabel kosong) -- cek apakah "
+            f"update_metar_dataset.yml berhenti jalan (rate limit BMKG API, "
+            f"cron GitHub Actions delay, dll)."
         )
 
     rows = []
