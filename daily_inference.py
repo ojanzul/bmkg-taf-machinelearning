@@ -34,6 +34,24 @@ ICAO = "WALS"
 STATION_LAT, STATION_LON = -0.374, 117.255
 MODEL_BUNDLE_PATH = os.environ.get("MODEL_BUNDLE_PATH", "model_bundle_v1.joblib")
 
+
+def _ensure_tz_naive_index(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Paksa index datetime jadi tz-naive. Seluruh pipeline ini (METAR lewat
+    python-metar, NWP lewat Open-Meteo) konsisten pakai UTC TANPA info
+    timezone eksplisit -- kalau ada satu sumber yang tiba-tiba berubah
+    jadi tz-aware (misal versi library berubah, atau format Supabase
+    berubah), ini mencegah TypeError "Cannot compare tz-naive and
+    tz-aware" saat slicing .loc[t-delta : t] di taf_features.py.
+    """
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    return df
+
+
+def _ensure_tz_naive_timestamp(t: pd.Timestamp) -> pd.Timestamp:
+    return t.tz_localize(None) if t.tzinfo is not None else t
+
 NWP_HOURLY_VARS = (
     "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,"
     "surface_pressure,pressure_msl,cloud_cover,cloud_cover_low,cloud_cover_mid,"
@@ -100,7 +118,8 @@ def fetch_recent_metar_from_supabase(hours_back: int = 18) -> pd.DataFrame:
 
     df = pd.DataFrame(rows, columns=FIELDNAMES)
     df["valid_time_utc"] = pd.to_datetime(df["valid_time_utc"])
-    return df.sort_values("valid_time_utc").reset_index(drop=True).set_index("valid_time_utc")
+    df = df.sort_values("valid_time_utc").reset_index(drop=True).set_index("valid_time_utc")
+    return _ensure_tz_naive_index(df)
 
 
 def fetch_forecast_nwp() -> pd.DataFrame:
@@ -121,7 +140,8 @@ def fetch_forecast_nwp() -> pd.DataFrame:
     df = pd.DataFrame(data)
     df.columns = [c.split(" (")[0] for c in df.columns]  # jaga-jaga kalau API kirim unit di nama kolom
     df["time"] = pd.to_datetime(df["time"])
-    return df.set_index("time").sort_index()
+    df = df.set_index("time").sort_index()
+    return _ensure_tz_naive_index(df)
 
 
 def run_inference(issue_time: pd.Timestamp, metar_df: pd.DataFrame, nwp_df: pd.DataFrame,
@@ -176,8 +196,8 @@ def save_predictions_to_supabase(predictions: list[dict]) -> int:
 
 
 def main():
-    issue_time = pd.Timestamp(datetime.now(timezone.utc)).floor("h")
-    print(f"[INFO] Inferensi untuk issue_time={issue_time.isoformat()}")
+    issue_time = _ensure_tz_naive_timestamp(pd.Timestamp(datetime.now(timezone.utc)).floor("h"))
+    print(f"[INFO] Inferensi untuk issue_time={issue_time.isoformat()} (UTC, tz-naive)")
 
     bundle = joblib.load(MODEL_BUNDLE_PATH)
     print(f"[INFO] Model bundle generasi {bundle['trained_on']['generation']}, "
