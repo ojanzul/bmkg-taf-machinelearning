@@ -1,0 +1,33 @@
+name: Verify TAF predictions
+
+# Verifikasi tiap jam -- cukup sering supaya backlog tidak menumpuk,
+# tapi tidak perlu lebih sering dari itu karena horizon terpendek (h+1)
+# baru "siap diverifikasi" 1+1 jam setelah prediksi dibuat.
+on:
+  schedule:
+    - cron: "15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan verifikasi prediksi vs aktual
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python verify_predictions.py
