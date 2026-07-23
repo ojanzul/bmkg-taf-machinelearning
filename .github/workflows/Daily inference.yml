@@ -1,0 +1,29 @@
+name: Prediksi TAF harian (inferensi model ML)
+
+# Jalan di jam terbit TAF standar: 00Z, 06Z, 12Z, 18Z
+on:
+  schedule:
+    - cron: "0 0,6,12,18 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  daily-inference:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan inferensi harian
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python daily_inference.py
