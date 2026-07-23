@@ -13,12 +13,13 @@ banyak edge case format ICAO.
 """
 
 import csv
+import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from metar import Metar
 
-INPUT_FILE = "wals_metar_raw.txt"
+INPUT_FILE = "wals_metar_raw_archive.csv"
 OUTPUT_FILE = "wals_metar_structured.csv"
 
 FIELDNAMES = [
@@ -79,15 +80,50 @@ def detect_thunderstorm(obs) -> tuple[int, int, str | None]:
     return 0, 0, None
 
 
-def parse_one_line(raw_line: str) -> dict | None:
+def resolve_month_year(first_seen_utc: datetime, report_day: int) -> tuple[int, int]:
+    """
+    METAR mentah cuma menyimpan DDHHMMZ (tanggal-jam-menit), TIDAK ada bulan/
+    tahun. Untuk tahu bulan/tahun yang benar, kita pakai `first_seen_utc` --
+    waktu SAAT baris ini pertama kali berhasil di-fetch (dicatat di
+    run_pipeline.py, bukan ditebak ulang tiap kali file di-parse).
+
+    Cocokkan `report_day` (tanggal dari kode METAR) terhadap first_seen_utc
+    atau 1-2 hari sebelumnya (menangani kasus fetch dilakukan tak lama
+    setelah pergantian hari/bulan, sementara laporan masih dari hari
+    sebelumnya).
+    """
+    for delta_days in range(0, 3):
+        candidate = (first_seen_utc - timedelta(days=delta_days)).date()
+        if candidate.day == report_day:
+            return candidate.year, candidate.month
+    # Tidak ketemu kecocokan wajar (harusnya sangat jarang terjadi kalau
+    # fetch dijalankan rutin tiap ~30 menit) -- fallback ke first_seen,
+    # tapi kasih peringatan supaya kelihatan di log kalau ini terjadi.
+    print(
+        f"[WARN] tanggal METAR (hari={report_day}) tidak cocok dengan "
+        f"first_seen_utc={first_seen_utc.isoformat()} dalam radius 2 hari. "
+        f"Pakai fallback bulan/tahun dari first_seen -- CEK MANUAL baris ini.",
+        file=sys.stderr,
+    )
+    return first_seen_utc.year, first_seen_utc.month
+
+
+def parse_one_line(raw_line: str, first_seen_utc: datetime) -> dict | None:
     raw_line = raw_line.strip()
     if not raw_line:
         return None
     # Buang tanda '=' di akhir laporan kalau masih ada
     raw_line = raw_line.rstrip("=").strip()
 
+    day_match = re.match(r"^(?:METAR|SPECI)\s+\w{4}\s+(\d{2})\d{4}Z", raw_line)
+    if not day_match:
+        print(f"[SKIP] format tanggal tidak dikenali: {raw_line[:60]}...", file=sys.stderr)
+        return None
+    report_day = int(day_match.group(1))
+    year, month = resolve_month_year(first_seen_utc, report_day)
+
     try:
-        obs = Metar.Metar(raw_line)
+        obs = Metar.Metar(raw_line, month=month, year=year)
     except Exception as e:
         print(f"[SKIP] gagal parsing: {raw_line[:60]}... -> {e}", file=sys.stderr)
         return None
@@ -130,10 +166,17 @@ def parse_one_line(raw_line: str) -> dict | None:
 
 
 def main(input_file: str = INPUT_FILE, output_file: str = OUTPUT_FILE):
+    """
+    Mode standalone/testing: baca arsip CSV (kolom raw_metar, first_seen_utc
+    -- format yang sama dipakai run_pipeline.py). Kalau mau tes 1 baris METAR
+    lepas tanpa CSV, panggil parse_one_line(line, first_seen_utc) langsung.
+    """
     rows = []
-    with open(input_file, "r") as f:
-        for line in f:
-            parsed = parse_one_line(line)
+    with open(input_file, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for rec in reader:
+            first_seen = datetime.fromisoformat(rec["first_seen_utc"])
+            parsed = parse_one_line(rec["raw_metar"], first_seen)
             if parsed:
                 rows.append(parsed)
 
