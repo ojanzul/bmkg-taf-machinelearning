@@ -40,4 +40,8 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: update dataset METAR WALS otomatis"
-          file_pattern: "data/*.csv data/*.txt"
+          # Arsip sudah dimigrasi dari .txt ke .csv (lihat perbaikan bug
+          # tanggal) -- pattern .txt dihapus karena file itu tidak pernah
+          # ada lagi, dan git-auto-commit-action gagal (exit 128) kalau
+          # sebuah pattern di file_pattern tidak match apa pun sama sekali.
+          file_pattern: "data/*.csv"
