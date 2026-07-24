@@ -1,0 +1,33 @@
+name: Compute verification metrics
+
+# Dihitung 1x/hari -- cukup, karena ini rolling 7 hari (tidak berubah
+# drastis dalam hitungan jam). Dijadwalkan setelah verify_predictions
+# sempat jalan beberapa kali di hari itu supaya datanya lebih lengkap.
+on:
+  schedule:
+    - cron: "30 15 * * *"  # 15:30 UTC = 23:30 WITA
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  compute-metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Hitung metrik verifikasi operasional
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python compute_verification_metrics.py
