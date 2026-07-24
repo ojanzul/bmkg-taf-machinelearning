@@ -147,6 +147,12 @@
 
   .skeleton { color: var(--text-dim); font-size: 12px; padding: 4px 0; }
   .error-box { color: var(--danger); font-size: 12px; padding: 8px 0; }
+
+  .signal-note {
+    font-size: 11px; color: var(--text-dim); line-height: 1.6;
+    padding: 12px 16px 0; margin-bottom: -4px;
+  }
+  .signal-note b { color: var(--text-mid); }
 </style>
 </head>
 <body>
@@ -221,7 +227,12 @@
     </div>
 
     <div class="panel">
-      <div class="panel-head">📊 Ringkasan Prediksi</div>
+      <div class="panel-head">📊 Ringkasan Prediksi (Probabilitas Kumulatif)</div>
+      <div class="signal-note">
+        Angka di bawah ini = peluang fenomena terjadi <b>kapan saja</b> dalam rentang jam tersebut.
+        Beda dengan angka <span class="mono">[P=%]</span> di teks TAF sebelah kiri, yang menunjukkan
+        peluang <b>khusus di blok waktu itu saja</b> (biasanya lebih kecil, karena rentangnya lebih sempit).
+      </div>
       <div class="signal-grid" id="signal-panel">
         <div class="skeleton">Memuat…</div>
       </div>
@@ -304,7 +315,7 @@ async function loadSignalSummary() {
         <div class="signal-card">
           <div class="label">${TARGET_ICONS[target]} ${TARGET_LABELS[target]}</div>
           <div class="peak peak-${cls}">${(peakRow.probability * 100).toFixed(0)}%</div>
-          <div class="window">Puncak dalam ${peakRow.horizon_hours} jam ke depan</div>
+          <div class="window">Kumulatif, puncak di h+${peakRow.horizon_hours}j</div>
           <span class="signal-tag tag-${cls}">${tag}</span>
         </div>`;
     }
