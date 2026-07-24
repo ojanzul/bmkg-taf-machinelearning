@@ -35,22 +35,19 @@ STATION_LAT, STATION_LON = -0.374, 117.255
 MODEL_BUNDLE_PATH = os.environ.get("MODEL_BUNDLE_PATH", "model_bundle_v1.joblib")
 
 
-def _ensure_tz_naive_index(df: pd.DataFrame) -> pd.DataFrame:
+def to_naive_utc(ts) -> pd.Timestamp:
     """
-    Paksa index datetime jadi tz-naive. Seluruh pipeline ini (METAR lewat
-    python-metar, NWP lewat Open-Meteo) konsisten pakai UTC TANPA info
-    timezone eksplisit -- kalau ada satu sumber yang tiba-tiba berubah
-    jadi tz-aware (misal versi library berubah, atau format Supabase
-    berubah), ini mencegah TypeError "Cannot compare tz-naive and
-    tz-aware" saat slicing .loc[t-delta : t] di taf_features.py.
+    Model dilatih pakai timestamp NAIVE (data historis tidak punya info
+    timezone eksplisit). Supabase mengembalikan timestamp tz-AWARE
+    (format ISO dengan offset +00:00), jadi harus dinormalisasi supaya
+    konsisten -- kalau tidak, perbandingan/slicing pandas antara index
+    naive vs aware akan error (TypeError: Cannot compare tz-naive and
+    tz-aware datetime-like objects).
     """
-    if df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
-    return df
-
-
-def _ensure_tz_naive_timestamp(t: pd.Timestamp) -> pd.Timestamp:
-    return t.tz_localize(None) if t.tzinfo is not None else t
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return ts
 
 NWP_HOURLY_VARS = (
     "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,"
@@ -118,8 +115,7 @@ def fetch_recent_metar_from_supabase(hours_back: int = 18) -> pd.DataFrame:
 
     df = pd.DataFrame(rows, columns=FIELDNAMES)
     df["valid_time_utc"] = pd.to_datetime(df["valid_time_utc"])
-    df = df.sort_values("valid_time_utc").reset_index(drop=True).set_index("valid_time_utc")
-    return _ensure_tz_naive_index(df)
+    return df.sort_values("valid_time_utc").reset_index(drop=True).set_index("valid_time_utc")
 
 
 def fetch_forecast_nwp() -> pd.DataFrame:
@@ -140,8 +136,7 @@ def fetch_forecast_nwp() -> pd.DataFrame:
     df = pd.DataFrame(data)
     df.columns = [c.split(" (")[0] for c in df.columns]  # jaga-jaga kalau API kirim unit di nama kolom
     df["time"] = pd.to_datetime(df["time"])
-    df = df.set_index("time").sort_index()
-    return _ensure_tz_naive_index(df)
+    return df.set_index("time").sort_index()
 
 
 def run_inference(issue_time: pd.Timestamp, metar_df: pd.DataFrame, nwp_df: pd.DataFrame,
@@ -171,7 +166,10 @@ def run_inference(issue_time: pd.Timestamp, metar_df: pd.DataFrame, nwp_df: pd.D
 
             predictions.append({
                 "station": ICAO,
-                "issue_time": issue_time.isoformat(),
+                # issue_time naive tapi implisit UTC -- tandai eksplisit "Z"
+                # supaya Postgres (kolom timestamptz) tidak salah asumsi
+                # timezone sesi.
+                "issue_time": issue_time.isoformat() + "Z",
                 "target": wx,
                 "horizon_hours": h,
                 "probability": round(proba, 4),
@@ -196,8 +194,13 @@ def save_predictions_to_supabase(predictions: list[dict]) -> int:
 
 
 def main():
-    issue_time = _ensure_tz_naive_timestamp(pd.Timestamp(datetime.now(timezone.utc)).floor("h"))
-    print(f"[INFO] Inferensi untuk issue_time={issue_time.isoformat()} (UTC, tz-naive)")
+    # tz-naive dengan sengaja: python-metar (parse_one_line) dan respons
+    # Open-Meteo sama-sama menghasilkan datetime NAIVE (implisit UTC, lihat
+    # taf_features.py). issue_time harus konsisten -- kalau dibuat tz-aware
+    # di sini, pandas akan menolak bandingkan dgn index metar_df/nwp_df yg
+    # naive ("Cannot compare tz-naive and tz-aware datetime-like objects").
+    issue_time = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None)).floor("h")
+    print(f"[INFO] Inferensi untuk issue_time={issue_time.isoformat()}")
 
     bundle = joblib.load(MODEL_BUNDLE_PATH)
     print(f"[INFO] Model bundle generasi {bundle['trained_on']['generation']}, "
