@@ -145,14 +145,25 @@
   .peak-prob30 { color: var(--warn); }
   .peak-aman { color: var(--ok); }
 
-  .skeleton { color: var(--text-dim); font-size: 12px; padding: 4px 0; }
-  .error-box { color: var(--danger); font-size: 12px; padding: 8px 0; }
-
   .signal-note {
     font-size: 11px; color: var(--text-dim); line-height: 1.6;
     padding: 12px 16px 0; margin-bottom: -4px;
   }
   .signal-note b { color: var(--text-mid); }
+
+  .verify-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 16px; }
+  @media (max-width: 700px) { .verify-grid { grid-template-columns: 1fr; } }
+  .verify-card {
+    border: 1px solid var(--panel-border); border-radius: 8px; padding: 14px;
+    background: #0d1220;
+  }
+  .verify-card .vlabel { font-size: 12px; font-weight: 700; margin-bottom: 10px; display:flex; align-items:center; gap:6px; }
+  .verify-card .vgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+  .verify-card .vmetric { }
+  .verify-card .vmetric .vval { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 700; }
+  .verify-card .vmetric .vkey { font-size: 9.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; }
+  .verify-card .vn { font-size: 10.5px; color: var(--text-dim); margin-top: 10px; padding-top: 8px; border-top: 1px solid #1a2130; }
+  .vgood { color: var(--ok); } .vmid { color: var(--warn); } .vbad { color: var(--danger); }
 </style>
 </head>
 <body>
@@ -237,7 +248,19 @@
         <div class="skeleton">Memuat…</div>
       </div>
     </div>
+
+    <div class="panel">
+      <div class="panel-head">✅ Verifikasi Performa Operasional (7 Hari Terakhir)</div>
+      <div class="signal-note">
+        Prediksi vs kejadian aktual yang SUDAH terjadi & terverifikasi -- ini yang menjawab
+        "model ini bagus tidak?" dengan angka, bukan asumsi.
+      </div>
+      <div class="verify-grid" id="verify-metrics-panel">
+        <div class="skeleton" style="padding:16px">Memuat…</div>
+      </div>
+    </div>
   </div>
+
 </main>
 
 <script>
@@ -325,6 +348,51 @@ async function loadSignalSummary() {
   }
 }
 
+function verifyColorClass(metricName, value) {
+  if (value === null || value === undefined) return '';
+  if (metricName === 'accuracy' || metricName === 'roc_auc') {
+    if (value >= 0.8) return 'vgood';
+    if (value >= 0.65) return 'vmid';
+    return 'vbad';
+  }
+  if (metricName === 'brier_score' || metricName === 'reliability_ece') {
+    if (value <= 0.1) return 'vgood';
+    if (value <= 0.25) return 'vmid';
+    return 'vbad';
+  }
+  return '';
+}
+
+async function loadVerificationMetrics() {
+  const el = document.getElementById('verify-metrics-panel');
+  try {
+    const rows = await sbFetch(`taf_verification_metrics?window_days=eq.7&order=target.asc`);
+    if (!rows.length) {
+      el.innerHTML = '<div class="skeleton" style="padding:16px">Belum ada metrik terhitung -- butuh beberapa hari data terverifikasi dulu.</div>';
+      return;
+    }
+
+    let html = '';
+    for (const r of rows) {
+      const na = (v, digits = 2) => (v === null || v === undefined ? '-' : v.toFixed(digits));
+      html += `
+        <div class="verify-card">
+          <div class="vlabel">${TARGET_ICONS[r.target] || ''} ${TARGET_LABELS[r.target] || r.target}</div>
+          <div class="vgrid">
+            <div class="vmetric"><div class="vval ${verifyColorClass('accuracy', r.accuracy)}">${na(r.accuracy)}</div><div class="vkey">Accuracy</div></div>
+            <div class="vmetric"><div class="vval ${verifyColorClass('roc_auc', r.roc_auc)}">${r.roc_auc !== null ? na(r.roc_auc) : 'N/A'}</div><div class="vkey">ROC-AUC</div></div>
+            <div class="vmetric"><div class="vval ${verifyColorClass('brier_score', r.brier_score)}">${na(r.brier_score, 3)}</div><div class="vkey">Brier Score</div></div>
+            <div class="vmetric"><div class="vval ${verifyColorClass('reliability_ece', r.reliability_ece)}">${na(r.reliability_ece, 3)}</div><div class="vkey">Reliability (ECE)</div></div>
+          </div>
+          <div class="vn">n=${r.n_verified} terverifikasi, ${r.n_positive} kejadian aktual · update ${fmtTime(r.computed_at)}</div>
+        </div>`;
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = `<div class="error-box" style="padding:16px">Gagal memuat: ${e.message}</div>`;
+  }
+}
+
 async function loadDraft() {
   const el = document.getElementById('terminal-panel');
   try {
@@ -341,7 +409,7 @@ async function refreshAll() {
   document.getElementById('conn-text').textContent = 'Memuat…';
   document.getElementById('conn-dot').className = 'dot pending';
   try {
-    await Promise.all([loadMetar(), loadSignalSummary(), loadDraft()]);
+    await Promise.all([loadMetar(), loadSignalSummary(), loadDraft(), loadVerificationMetrics()]);
     document.getElementById('conn-dot').className = 'dot ok';
     document.getElementById('conn-text').textContent = 'Tersambung';
   } catch (e) {
