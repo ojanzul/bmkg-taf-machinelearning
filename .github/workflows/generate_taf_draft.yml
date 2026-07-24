@@ -1,0 +1,39 @@
+name: Generate draft TAF
+
+# Terpicu OTOMATIS setiap kali workflow "Prediksi TAF harian (inferensi
+# model ML)" selesai jalan (bukan jadwal cron terpisah) -- supaya draft
+# TAF selalu pakai prediksi yang PALING BARU, tidak ada risiko out-of-sync
+# antara jadwal inferensi dan jadwal generate draft.
+on:
+  workflow_run:
+    workflows: ["Prediksi TAF harian (inferensi model ML)"]
+    types: [completed]
+  workflow_dispatch: {}  # tetap bisa dipicu manual dari tab Actions kalau perlu
+
+jobs:
+  generate-draft:
+    runs-on: ubuntu-latest
+    # Cuma jalan kalau workflow inferensi yang memicu ini SUKSES --
+    # kalau daily_inference.py gagal, tidak ada gunanya generate draft
+    # dari prediksi yang tidak ter-update.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate draft TAF
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python generate_taf_draft.py
